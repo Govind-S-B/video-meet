@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Meeting App</title>
+    <style>
+        body {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+        }
+
+        video {
+            width: 30%;
+            height: auto;
+            margin: 1%;
+            border: 1px solid #ccc;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+
+<body>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.4.1/socket.io.min.js"></script>
+    <script>
+        const socket = io.connect('http://' + document.domain + ':' + location.port);
+        const localVideo = document.createElement('video');
+        localVideo.muted = true;
+
+        const startVideo = async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                localVideo.srcObject = stream;
+                document.body.appendChild(localVideo);
+                localVideo.play();
+
+                stream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, stream);
+                });
+            } catch (error) {
+                console.error('Error accessing media devices.', error);
+            }
+        };
+
+        const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+        const peerConnection = new RTCPeerConnection(configuration);
+
+        peerConnection.ontrack = (event) => {
+            const remoteVideo = document.createElement('video');
+            remoteVideo.srcObject = event.streams[0];
+            document.body.appendChild(remoteVideo);
+            remoteVideo.play();
+        };
+
+        socket.on('connect', () => {
+            startVideo();
+        });
+
+        socket.on('offer', async (message) => {
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(message));
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+            socket.emit('answer', answer);
+        });
+
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                socket.emit('ice_candidate', event.candidate);
+            }
+        };
+
+        socket.on('ice_candidate', (candidate) => {
+            peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        });
+
+        socket.on('disconnect', () => {
+            peerConnection.close();
+        });
+    </script>
+</body>
+
+</html>
