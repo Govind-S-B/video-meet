@@ -6,82 +6,159 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Simple Meeting App</title>
     <style>
-        body {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-            background-color: #f0f0f0;
+        #videoGrid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            grid-auto-rows: minmax(200px, 1fr);
         }
 
         video {
-            width: 30%;
-            height: auto;
-            margin: 1%;
-            border: 1px solid #ccc;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
         }
     </style>
 </head>
 
 <body>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.4.1/socket.io.min.js"></script>
+    <div id="videoGrid"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js"></script>
     <script>
-        const socket = io.connect('http://' + document.domain + ':' + location.port);
-        const localVideo = document.createElement('video');
-        localVideo.muted = true;
+        const socket = io();
+        const videoGrid = document.getElementById('videoGrid');
+        const myVideo = document.createElement('video');
+        myVideo.muted = true;
 
-        const startVideo = async () => {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-                localVideo.srcObject = stream;
-                document.body.appendChild(localVideo);
-                localVideo.play();
+        const constraints = {
+            video: true,
+            audio: false
+        };
 
-                stream.getTracks().forEach(track => {
-                    peerConnection.addTrack(track, stream);
+        const peers = {};
+
+        function createPeerConnection(socketId) {
+            const pc = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                ]
+            });
+
+            pc.onicecandidate = event => {
+                if (event.candidate) {
+                    socket.emit('ice_candidate', {
+                        target: socketId,
+                        candidate: event.candidate
+                    });
+                }
+            };
+
+            pc.ontrack = event => {
+                const remoteVideo = document.createElement('video');
+                remoteVideo.srcObject = event.streams[0];
+                remoteVideo.addEventListener('loadedmetadata', () => {
+                    remoteVideo.play();
                 });
-            } catch (error) {
-                console.error('Error accessing media devices.', error);
-            }
-        };
+                videoGrid.append(remoteVideo);
+            };
 
-        const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-        const peerConnection = new RTCPeerConnection(configuration);
+            return pc;
+        }
 
-        peerConnection.ontrack = (event) => {
-            const remoteVideo = document.createElement('video');
-            remoteVideo.srcObject = event.streams[0];
-            document.body.appendChild(remoteVideo);
-            remoteVideo.play();
-        };
+        function addLocalStreamToPeerConnection(pc, stream) {
+            stream.getTracks().forEach(track => {
+                pc.addTrack(track, stream);
+            });
+        }
 
-        socket.on('connect', () => {
-            startVideo();
-        });
+        function handleOffer(socketId, description) {
+            const pc = createPeerConnection(socketId);
+            pc.setRemoteDescription(description)
+                .then(() => pc.createAnswer())
+                .then(answer => {
+                    pc.setLocalDescription(answer);
+                    socket.emit('answer', {
+                        target: socketId,
+                        description: answer
+                    });
+                })
+                .catch(err => {
+                    console.error('Failed to handle offer:', err);
+                });
 
-        socket.on('offer', async (message) => {
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(message));
-            const answer = await peerConnection.createAnswer();
-            await peerConnection.setLocalDescription(answer);
-            socket.emit('answer', answer);
-        });
+            peers[socketId] = pc;
+        }
 
-        peerConnection.onicecandidate = (event) => {
-            if (event.candidate) {
-                socket.emit('ice_candidate', event.candidate);
-            }
-        };
+        function handleAnswer(socketId, description) {
+            const pc = peers[socketId];
+            pc.setRemoteDescription(description).catch(err => {
+                console.error('Failed to handle answer:', err);
+            });
+        }
 
-        socket.on('ice_candidate', (candidate) => {
-            peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-        });
+        function handleIceCandidate(socketId, candidate) {
+            const pc = peers[socketId];
+            pc.addIceCandidate(candidate).catch(err => {
+                console.error('Failed to handle ICE candidate:', err);
+            });
+        }
 
-        socket.on('disconnect', () => {
-            peerConnection.close();
-        });
+        navigator.mediaDevices.getUserMedia(constraints)
+            .then(stream => {
+                myVideo.srcObject = stream;
+                myVideo.addEventListener('loadedmetadata', () => {
+                    myVideo.play();
+                });
+                videoGrid.append(myVideo);
+
+                socket.on('connect', () => {
+                    console.log('Connected to server:', socket.id);
+                });
+
+                socket.on('disconnect', () => {
+                    console.log('Disconnected from server:', socket.id);
+                });
+
+                socket.on('offer', data => {
+                    handleOffer(data.sender, data.description);
+                });
+
+                socket.on('answer', data => {
+                    handleAnswer(data.sender, data.description);
+                });
+
+                socket.on('ice_candidate', data => {
+                    handleIceCandidate(data.sender, data.candidate);
+                });
+
+                socket.on('user_connected', socketId => {
+                    const pc = createPeerConnection(socketId);
+                    addLocalStreamToPeerConnection(pc, stream);
+                    pc.createOffer()
+                        .then(offer => {
+                            pc.setLocalDescription(offer);
+                            socket.emit('offer', {
+                                target: socketId,
+                                description: offer
+                            });
+                        })
+                        .catch(err => {
+                            console.error('Failed to create offer:', err);
+                        });
+
+                    peers[socketId] = pc;
+                });
+
+                socket.on('user_disconnected', socketId => {
+                    if (peers[socketId]) {
+                        peers[socketId].close();
+                        delete peers[socketId];
+                    }
+                });
+            })
+            .catch(err => {
+                console.error('Failed to get user media:', err);
+            });
     </script>
 </body>
 
